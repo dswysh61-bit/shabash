@@ -1,259 +1,264 @@
-import os, sqlite3, secrets, html
-from datetime import date, timedelta
-from urllib.parse import quote
-from flask import Flask, request, session, redirect, render_template_string, abort
-from werkzeug.security import generate_password_hash, check_password_hash
+<!doctype html>
+<html lang="he" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>גיוון תנועות</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Hebrew:wght@400;600;700&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+/* Layout: one narrow operational column — today's instruction on top, then balance, then the log */
+:root{
+  --bg:#eef1f4; --panel:#ffffff; --fg:#17202b; --muted:#5b6878; --line:#d6dce4;
+  --accent:#1d5fbf; --accent-fg:#ffffff; --wa:#1a8f4c; --soft:#e4e9f0; --warn:#9a5b00;
+  --r-red:#d63b3f; --r-blue:#2f74e0; --r-green:#21915c; --r-yellow:#d9a400; --r-white:#9aa6b4;
+  --f-body:"IBM Plex Sans Hebrew",Arial,sans-serif; --f-mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0f1620; --panel:#18222f; --fg:#e8eef6; --muted:#97a5b7; --line:#2a3646;
+  --accent:#4d8ef0; --accent-fg:#0b1220; --wa:#2fbf6c; --soft:#223042; --warn:#f0b54a; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f1620; --panel:#18222f; --fg:#e8eef6; --muted:#97a5b7; --line:#2a3646;
+  --accent:#4d8ef0; --accent-fg:#0b1220; --wa:#2fbf6c; --soft:#223042; --warn:#f0b54a; color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:15px;line-height:1.5;direction:rtl}
+.wrap{max-width:860px;margin:0 auto;padding-block:20px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:16px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px}
+h1{font-size:24px;margin:0;text-wrap:balance}
+h2{font-size:17px;margin:0}
+.note{color:var(--warn);font-size:13px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;display:flex;flex-direction:column;gap:14px;min-width:0}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:end}
+label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted);font-weight:600}
+input,select{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px;min-width:0}
+button,.btn{font:inherit;font-weight:600;border:1px solid var(--line);background:var(--soft);color:var(--fg);border-radius:8px;padding:10px 14px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+.wa{background:var(--wa);border-color:var(--wa);color:#fff}
+button:focus-visible,.btn:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.status{padding:10px 12px;border-radius:8px;background:var(--soft);display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.grid2>*{min-width:0}
+.tbl{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:right;padding:6px 4px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-size:12px;font-weight:600}
+.num{font-variant-numeric:tabular-nums;font-weight:700}
+.why{color:var(--muted);font-size:12px}
+.pick{background:var(--soft)}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-inline-end:6px;vertical-align:middle}
+.bar{height:8px;border-radius:4px;background:var(--soft);overflow:hidden}
+.bar i{display:block;height:100%}
+.stat{display:flex;flex-direction:column;gap:6px}
+.stat .line{display:flex;justify-content:space-between;gap:8px;font-size:14px}
+.score{font-size:28px;font-weight:700;font-variant-numeric:tabular-nums}
+.tabs{display:flex;gap:6px;flex-wrap:wrap}
+.tabs button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+.log{display:flex;flex-direction:column;gap:8px}
+.entry{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:8px}
+.entry .d{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+.chips{display:flex;gap:10px;flex-wrap:wrap;font-size:14px}
+.acts{display:flex;gap:6px;flex-wrap:wrap}
+.acts button,.acts .btn{padding:6px 10px;font-size:13px}
+.demo{border:1px dashed var(--warn);color:var(--warn);border-radius:8px;padding:10px 12px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+.muted{color:var(--muted);font-size:13px}
+pre{white-space:pre-wrap;font:inherit;margin:0}
+@media (prefers-reduced-motion:no-preference){.bar i{transition:width .3s}}
+</style>
 
-app = Flask(__name__)
-SECRET = os.environ.get('SECRET_KEY')
-if not SECRET or len(SECRET) < 32:
-    raise SystemExit('SECRET_KEY חסר או קצר מ-32 תווים')
-app.secret_key = SECRET
-app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax',
-                  SESSION_COOKIE_SECURE=os.environ.get('PRODUCTION') == '1')
-DB = os.environ.get('DATABASE_PATH', 'demo.sqlite3')
-RNG = secrets.SystemRandom()          # אקראיות קריפטוגרפית — לא ניתנת לחיזוי
+<div class="wrap">
+  <header>
+    <h1>גיוון תנועות</h1>
+    <span class="note">דמו. לא להזין נתונים מבצעיים.</span>
+  </header>
 
-# ---- הגדרות האלגוריתם ----
-WINDOW_DAYS = 28        # כמה ימים אחורה נבדק האיזון
-NO_REPEAT_DAYS = 1      # אסור לחזור על אותו צבע באותו כיוון X ימים ברצף
-MIN_WEIGHT = 0.15       # גם צבע "עמוס" נשאר עם סיכוי קטן — כדי שלא יהיה צפוי
+  <div id="demoBox" class="demo" hidden>
+    <span>מוצגים נתוני דוגמה של 25 ימים. בשמירה הראשונה הם יימחקו.</span>
+    <button id="clearDemo" type="button">התחל נקי</button>
+  </div>
 
-COLORS = {'red': '🔴 אדום / Red', 'blue': '🔵 כחול / Blue', 'green': '🟢 ירוק / Green',
-          'yellow': '🟡 צהוב / Yellow', 'white': '⚪ בחירה חופשית / Free choice'}
-ROUTES = [k for k in COLORS if k != 'white']
-DIR_HE = {'arrival': 'הגעה', 'departure': 'יציאה'}
+  <section aria-labelledby="h-plan">
+    <h2 id="h-plan">הנחיה ליום</h2>
+    <form id="planForm" class="row">
+      <label for="day">תאריך<input type="date" id="day" required></label>
+      <label for="arrival">הגעה<select id="arrival"></select></label>
+      <label for="departure">יציאה<select id="departure"></select></label>
+      <button type="button" id="suggestBtn">הגרל צבעים</button>
+      <button type="submit" class="primary">שמור</button>
+    </form>
+    <div id="suggestBox" hidden></div>
+    <div id="savedBox" class="status" hidden></div>
+  </section>
 
+  <section aria-labelledby="h-stats">
+    <div class="row" style="justify-content:space-between">
+      <h2 id="h-stats">סטטיסטיקות</h2>
+      <div class="tabs" id="tabs"></div>
+    </div>
+    <div class="grid2" id="stats"></div>
+    <p class="muted" id="statsNote"></p>
+  </section>
 
-def db():
-    c = sqlite3.connect(DB); c.row_factory = sqlite3.Row
-    c.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL)')
-    c.execute('CREATE TABLE IF NOT EXISTS plans (day TEXT PRIMARY KEY, arrival TEXT, departure TEXT)')
-    c.commit(); return c
+  <section aria-labelledby="h-log">
+    <h2 id="h-log">יומן הנחיות</h2>
+    <div class="log" id="log"></div>
+  </section>
+</div>
 
+<script>
+const WINDOW_DAYS = 28, NO_REPEAT_DAYS = 1, MIN_WEIGHT = 0.15;
+const COLORS = {
+  red:   {he:'🔴 אדום', en:'Red',    v:'--r-red'},
+  blue:  {he:'🔵 כחול', en:'Blue',   v:'--r-blue'},
+  green: {he:'🟢 ירוק', en:'Green',  v:'--r-green'},
+  yellow:{he:'🟡 צהוב', en:'Yellow', v:'--r-yellow'},
+  white: {he:'⚪ בחירה חופשית', en:'Free choice', v:'--r-white'}
+};
+const ROUTES = ['red','blue','green','yellow'];
+const DIRS = {arrival:'הגעה', departure:'יציאה'};
+const KEY = 'movement-plans-v1';
+const $ = id => document.getElementById(id);
 
-CSS = '''<meta name="viewport" content="width=device-width,initial-scale=1"><style>
-body{background:#101827;color:#f2f5ff;font-family:Arial,sans-serif;max-width:850px;margin:30px auto;padding:16px;direction:rtl}
-input,select,button,.btn{padding:12px;margin:6px;border-radius:9px;border:1px solid #54627a;background:#24364e;color:white;font-size:15px}
-button,.btn{background:#286fca;cursor:pointer;text-decoration:none;display:inline-block}
-.wa{background:#1fa855;border-color:#1fa855}.sug{background:#7a4fd0;border-color:#7a4fd0}
-.card{background:#1c2b40;padding:18px;margin:12px 0;border-radius:14px}a{color:#8bbfff}
-pre{white-space:pre-wrap;font:inherit}small{color:#ffdb89}
-.bar{height:10px;border-radius:5px;background:#2b3d57;overflow:hidden;margin:4px 0 10px}.bar i{display:block;height:100%}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
-table{width:100%;border-collapse:collapse}td,th{padding:6px;text-align:right;border-bottom:1px solid #2b3d57}
-.muted{color:#9fb0c8;font-size:13px}</style>'''
-BAR_COLOR = {'red': '#e5484d', 'blue': '#3e8ef7', 'green': '#30a46c', 'yellow': '#f5c518', 'white': '#c9d1dc'}
+/* ---- dates ---- */
+const pad = n => String(n).padStart(2,'0');
+const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const addDays = (iso, n) => { const d = new Date(iso+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+n); return d.toISOString().slice(0,10); };
+const diffDays = (a, b) => Math.round((new Date(a+'T00:00:00Z') - new Date(b+'T00:00:00Z')) / 864e5);
+const fmt = iso => { const [y,m,d] = iso.split('-'); return `${d}/${m}/${y}`; };
 
+/* ---- storage ---- */
+let plans = {}, isDemo = false;
+function load(){
+  try { const s = localStorage.getItem(KEY); if (s) { plans = JSON.parse(s) || {}; return; } } catch(e){}
+  // nothing stored: example data so the page shows how it works
+  isDemo = true; plans = {};
+  const pool = ['red','red','red','blue','green','yellow','white'];
+  let seed = 7; const rnd = () => (seed = (seed*9301+49297)%233280)/233280;
+  for (let i=1;i<=25;i++){
+    const a = pool[Math.floor(rnd()*pool.length)];
+    let d; do { d = pool[Math.floor(rnd()*pool.length)]; } while (d===a);
+    plans[addDays(todayISO(), -i)] = {arrival:a, departure:d};
+  }
+}
+function save(){ try { localStorage.setItem(KEY, JSON.stringify(plans)); } catch(e){} }
 
-def page(content):
-    # התוכן מועבר כמשתנה — לא כחלק מהתבנית (סוגר את חור ה-SSTI)
-    return render_template_string(
-        CSS + '<h2>מערכת גיוון תנועות — גרסת פיתוח</h2>'
-              '<small>דמו בלבד. אין להזין נתונים מבצעיים. אין לפרסם לפני בדיקת אבטחה.</small>{{ c|safe }}',
-        c=content)
+/* ---- secure random ---- */
+function rand(){ const a = new Uint32Array(1); crypto.getRandomValues(a); return a[0] / 4294967296; }
+function weightedPick(weights){
+  const keys = Object.keys(weights), tot = keys.reduce((s,k)=>s+weights[k],0);
+  let r = rand()*tot;
+  for (const k of keys){ r -= weights[k]; if (r < 0) return k; }
+  return keys.filter(k=>weights[k]>0).pop();
+}
 
+/* ---- the algorithm: random but calculated ---- */
+function suggestFor(target, dir, exclude){
+  const start = addDays(target, -WINDOW_DAYS);
+  const rows = Object.entries(plans).filter(([d]) => d >= start && d < target).sort(([a],[b]) => a<b?-1:1);
+  const used = rows.map(([,p]) => p[dir]).filter(c => ROUTES.includes(c));
+  const n = used.length, expected = n ? n/ROUTES.length : 0;
+  const lastSeen = {}; rows.forEach(([d,p]) => { if (ROUTES.includes(p[dir])) lastSeen[p[dir]] = d; });
+  const blockFrom = addDays(target, -NO_REPEAT_DAYS);
+  const blocked = new Set(rows.filter(([d]) => d >= blockFrom).map(([,p]) => p[dir]));
+  const weights = {}, why = {};
+  for (const k of ROUTES){
+    const cnt = used.filter(c=>c===k).length;
+    const balance = expected ? 1 + (expected - cnt)/expected : 1;          // less used → higher
+    const gap = lastSeen[k] ? diffDays(target, lastSeen[k]) : WINDOW_DAYS;
+    const recency = 1 + Math.min(gap, 7)/7;                                // longer ago → higher
+    let w = Math.max(MIN_WEIGHT, balance) * recency;
+    let note = `${cnt} פעמים ב-${WINDOW_DAYS} יום · אחרון לפני ${gap} ימים`;
+    if (blocked.has(k)) { w = 0; note = 'חסום: שומש אתמול'; }
+    if (k === exclude)  { w = 0; note = 'חסום: זהה להגעה'; }
+    weights[k] = w; why[k] = note;
+  }
+  if (!Object.values(weights).some(Boolean)) ROUTES.forEach(k => { if (k!==exclude) weights[k] = 1; });
+  const tot = Object.values(weights).reduce((a,b)=>a+b,0);
+  const probs = {}; ROUTES.forEach(k => probs[k] = Math.round(100*weights[k]/tot));
+  return {pick: weightedPick(weights), probs, why};
+}
 
-def protected():
-    if 'user' not in session: abort(403)
+/* ---- message ---- */
+function waText(day, a, d){
+  return `*הנחיות תנועה | Movement Instructions*\n${fmt(day)}\n\n*עברית*\nהגעה: ${COLORS[a].he}\nיציאה: ${COLORS[d].he}\nיש לפעול בהתאם להנחיות צוות הביטחון.\n\n*English*\nArrival: ${COLORS[a].en}\nDeparture: ${COLORS[d].en}\nPlease follow the Security Team's instructions.\n\n*צוות הביטחון | Security Team*`;
+}
+const waLink = t => 'https://wa.me/?text=' + encodeURIComponent(t);
+async function copy(text, btn){
+  try { await navigator.clipboard.writeText(text); btn.textContent = 'הועתק'; }
+  catch(e){ btn.textContent = 'לא הצליח, העתק ידנית'; }
+  setTimeout(()=>btn.textContent='העתק', 1600);
+}
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const dot = k => `<span class="dot" style="background:var(${COLORS[k].v})"></span>`;
+const label = k => `${COLORS[k].he} / ${COLORS[k].en}`;
 
+/* ---- form ---- */
+['arrival','departure'].forEach(id => {
+  $(id).innerHTML = Object.keys(COLORS).map(k => `<option value="${k}">${label(k)}</option>`).join('');
+});
+$('day').value = addDays(todayISO(), 1);
 
-def valid_day(s):
-    try: return date.fromisoformat(s).isoformat()
-    except (TypeError, ValueError): abort(400)
+$('suggestBtn').onclick = () => {
+  const day = $('day').value; if (!day) { $('day').focus(); return; }
+  const A = suggestFor(day, 'arrival');
+  const D = suggestFor(day, 'departure', A.pick);
+  $('arrival').value = A.pick; $('departure').value = D.pick;
+  const table = (title, r) => `<div class="tbl"><table><tr><th>${title}</th><th>סיכוי</th><th>למה</th></tr>${
+    ROUTES.map(k => `<tr class="${k===r.pick?'pick':''}"><td>${dot(k)}${COLORS[k].he}${k===r.pick?' ← נבחר':''}</td><td class="num">${r.probs[k]}%</td><td class="why">${r.why[k]}</td></tr>`).join('')
+  }</table></div>`;
+  $('suggestBox').innerHTML = `<p class="muted">הגרלה משוקללת ל-${fmt(day)}: צבע שהשתמשו בו פחות או מזמן מקבל סיכוי גבוה יותר. צבע מאתמול חסום, והיציאה שונה מההגעה. ההצעה מולאה בטופס. לא מתאים? הגרל שוב.</p><div class="grid2">${table('הגעה',A)}${table('יציאה',D)}</div>`;
+  $('suggestBox').hidden = false;
+};
 
+$('planForm').onsubmit = e => {
+  e.preventDefault();
+  const day = $('day').value; if (!day) return;
+  if (isDemo) { plans = {}; isDemo = false; }
+  const a = $('arrival').value, d = $('departure').value;
+  plans[day] = {arrival:a, departure:d}; save();
+  const text = waText(day, a, d);
+  $('savedBox').innerHTML = `<span>נשמר ל-${fmt(day)}.</span><a class="btn wa" href="${esc(waLink(text))}" target="_blank" rel="noopener">שלח ב-WhatsApp</a><button type="button" id="copySaved">העתק</button>`;
+  $('copySaved').onclick = ev => copy(text, ev.currentTarget);
+  $('savedBox').hidden = false; $('suggestBox').hidden = true;
+  render();
+};
 
-def check_csrf():
-    if not secrets.compare_digest(request.form.get('csrf', ''), session.get('csrf', '-')): abort(403)
+$('clearDemo').onclick = () => { plans = {}; isDemo = false; save(); render(); };
 
+/* ---- stats ---- */
+let period = '30';
+const PERIODS = [['7','7 ימים'],['30','30 ימים'],['90','90 ימים'],['all','הכול']];
+function renderStats(){
+  $('tabs').innerHTML = PERIODS.map(([k,t]) => `<button type="button" data-p="${k}" aria-pressed="${k===period}">${t}</button>`).join('');
+  $('tabs').querySelectorAll('button').forEach(b => b.onclick = () => { period = b.dataset.p; renderStats(); });
+  const from = period==='all' ? '' : addDays(todayISO(), -Number(period));
+  const rows = Object.entries(plans).filter(([d]) => d >= from).map(([,p]) => p);
+  $('stats').innerHTML = Object.entries(DIRS).map(([dir, name]) => {
+    const counts = {}; Object.keys(COLORS).forEach(k => counts[k] = rows.filter(p => p[dir]===k).length);
+    const n = ROUTES.reduce((s,k)=>s+counts[k],0);
+    const pct = k => k==='white' ? (rows.length ? 100*counts[k]/rows.length : 0) : (n ? 100*counts[k]/n : 0);
+    const score = n ? Math.round(100*(1 - ROUTES.reduce((s,k)=>s+Math.abs(pct(k)/100-.25),0)/1.5)) : null;
+    return `<div class="stat"><div class="line"><b>${name}</b><span class="muted">ציון איזון</span></div>
+      <div class="score">${score===null?'—':score+'/100'}</div>
+      ${Object.keys(COLORS).map(k => `<div class="line"><span>${dot(k)}${COLORS[k].he}</span><span class="num">${counts[k]} · ${pct(k).toFixed(0)}%</span></div>
+        <div class="bar"><i style="width:${pct(k).toFixed(0)}%;background:var(${COLORS[k].v})"></i></div>`).join('')}</div>`;
+  }).join('');
+  $('statsNote').textContent = `${rows.length} ימים בתקופה. היעד: 25% לכל צבע קבוע. ציון 100 = חלוקה שווה לגמרי.`;
+}
 
-# ---------- האלגוריתם: אקראי אבל מחושב ----------
-def suggest_for(c, target_day, direction, exclude=None):
-    """מחזיר (צבע נבחר, {צבע: אחוז סיכוי}, {צבע: הסבר})"""
-    t = date.fromisoformat(target_day)
-    start = (t - timedelta(days=WINDOW_DAYS)).isoformat()
-    rows = c.execute('SELECT day, arrival, departure FROM plans WHERE day>=? AND day<? ORDER BY day',
-                     (start, target_day)).fetchall()
-    used = [r[direction] for r in rows if r[direction] in ROUTES]
-    n = len(used)
-    expected = n / len(ROUTES) if n else 0
-    last_seen = {k: None for k in ROUTES}
-    for r in rows:
-        if r[direction] in ROUTES: last_seen[r[direction]] = date.fromisoformat(r['day'])
-    blocked = {r[direction] for r in rows
-               if date.fromisoformat(r['day']) >= t - timedelta(days=NO_REPEAT_DAYS)}
+/* ---- log ---- */
+function renderLog(){
+  const days = Object.keys(plans).sort().reverse().slice(0, 60);
+  if (!days.length){ $('log').innerHTML = '<p class="muted">עוד אין הנחיות. בחר תאריך, לחץ "הגרל צבעים" ואז "שמור".</p>'; return; }
+  $('log').innerHTML = days.map(d => { const p = plans[d]; return `<div class="entry">
+    <span class="d">${fmt(d)}</span>
+    <span class="chips"><span>הגעה ${dot(p.arrival)}${COLORS[p.arrival].he}</span><span>יציאה ${dot(p.departure)}${COLORS[p.departure].he}</span></span>
+    <span class="acts"><a class="btn wa" href="${esc(waLink(waText(d,p.arrival,p.departure)))}" target="_blank" rel="noopener">WhatsApp</a>
+      <button type="button" data-copy="${d}">העתק</button><button type="button" data-del="${d}">מחק</button></span></div>`; }).join('');
+  $('log').querySelectorAll('[data-copy]').forEach(b => b.onclick = () => { const p = plans[b.dataset.copy]; copy(waText(b.dataset.copy,p.arrival,p.departure), b); });
+  $('log').querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
+    if (b.dataset.armed){ delete plans[b.dataset.del]; if (!isDemo) save(); render(); }
+    else { b.dataset.armed = 1; b.textContent = 'בטוח? לחץ שוב'; setTimeout(()=>{ b.textContent='מחק'; delete b.dataset.armed; }, 2500); }
+  });
+}
 
-    weights, why = {}, {}
-    for k in ROUTES:
-        cnt = used.count(k)
-        # 1) איזון: צבע שהשתמשו בו פחות מהממוצע מקבל משקל גבוה יותר
-        balance = 1 + (expected - cnt) / expected if expected else 1
-        # 2) טריות: ככל שעבר יותר זמן מהשימוש האחרון — משקל גבוה יותר (עד שבוע)
-        gap = (t - last_seen[k]).days if last_seen[k] else WINDOW_DAYS
-        recency = 1 + min(gap, 7) / 7
-        w = max(MIN_WEIGHT, balance) * recency
-        note = f'{cnt} פעמים ב-{WINDOW_DAYS} יום, אחרון לפני {gap} ימים'
-        if k in blocked: w, note = 0, 'חסום — שומש אתמול'
-        if k == exclude: w, note = 0, 'חסום — זהה לצבע ההגעה'
-        weights[k], why[k] = w, note
-    if not any(weights.values()):            # מקרה קצה: הכול חסום
-        weights = {k: 1 for k in ROUTES if k != exclude}
-    total = sum(weights.values())
-    probs = {k: round(100 * w / total) for k, w in weights.items()}
-    pick = RNG.choices(list(weights), weights=list(weights.values()))[0]
-    return pick, probs, why
-
-
-def stats(c, days=None):
-    q, args = 'SELECT * FROM plans', ()
-    if days:
-        q += ' WHERE day>=?'; args = ((date.today() - timedelta(days=days)).isoformat(),)
-    rows = c.execute(q, args).fetchall()
-    out = {}
-    for d in DIR_HE:
-        counts = {k: sum(r[d] == k for r in rows) for k in COLORS}
-        n = sum(counts[k] for k in ROUTES)
-        pct = {k: (100 * counts[k] / n if n else 0) for k in ROUTES}
-        score = round(100 * (1 - sum(abs(pct[k] / 100 - .25) for k in ROUTES) / 1.5)) if n else None
-        out[d] = (counts, pct, score, n)
-    return out, len(rows)
-
-
-def bars(counts, pct, n, total_rows):
-    s = ''
-    for k in COLORS:
-        p = pct.get(k, 100 * counts[k] / total_rows if total_rows else 0)
-        s += (f'<div>{COLORS[k]} — <b>{counts[k]}</b> פעמים ({p:.0f}%)</div>'
-              f'<div class="bar"><i style="width:{p:.0f}%;background:{BAR_COLOR[k]}"></i></div>')
-    return s
-
-
-def wa_text(day, arrival, departure):
-    he = lambda k: COLORS[k].split(' / ')[0]; en = lambda k: COLORS[k].split(' / ')[1]
-    return (f'*הנחיות תנועה | Movement Instructions*\n{day}\n\n*עברית*\nהגעה: {he(arrival)}\nיציאה: {he(departure)}\n'
-            f'יש לפעול בהתאם להנחיות צוות הביטחון.\n\n*English*\nArrival: {en(arrival)}\nDeparture: {en(departure)}\n'
-            f"Please follow the Security Team's instructions.\n\n*צוות הביטחון | Security Team*")
-
-
-def wa_link(text):
-    # פותח את WhatsApp (אפליקציה בטלפון / WhatsApp Web במחשב) עם ההודעה מוכנה — בוחרים קבוצה ושולחים
-    return 'https://wa.me/?text=' + quote(text)
-
-
-# ---------- דפים ----------
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    c = db(); users = c.execute('SELECT count(*) FROM users').fetchone()[0]
-    if not users:
-        if request.method == 'POST':
-            tok = os.environ.get('SETUP_TOKEN', '')
-            if len(tok) < 24 or not secrets.compare_digest(request.form.get('token', ''), tok): return page('קוד הקמה לא תקין')
-            if len(request.form.get('password', '')) < 12: return page('סיסמה קצרה מדי')
-            c.execute('INSERT INTO users VALUES (?,?)', (request.form['username'], generate_password_hash(request.form['password'])))
-            c.commit(); session.clear(); session['user'] = request.form['username']; return redirect('/')
-        return page('<div class="card"><h3>הקמת מנהל ראשי</h3><form method="post">שם משתמש <input name="username" required><br>'
-                    'סיסמה (12 תווים לפחות) <input name="password" type="password" required><br>'
-                    'קוד הקמה מהשרת <input name="token" type="password" required><br><button>צור חשבון</button></form></div>')
-    if 'user' not in session: return redirect('/login')
-    session.setdefault('csrf', secrets.token_hex(24))
-
-    saved = ''
-    if request.method == 'POST':
-        check_csrf()
-        day = valid_day(request.form.get('day'))
-        a, d = request.form.get('arrival'), request.form.get('departure')
-        if a not in COLORS or d not in COLORS: abort(400)
-        c.execute('INSERT INTO plans VALUES (?,?,?) ON CONFLICT(day) DO UPDATE SET arrival=excluded.arrival,departure=excluded.departure', (day, a, d))
-        c.commit()
-        saved = (f'<div class="card">✅ נשמר ל-{day}. '
-                 f'<a class="btn wa" href="{html.escape(wa_link(wa_text(day, a, d)))}" target="_blank" rel="noopener">📲 שלח עכשיו ב-WhatsApp</a></div>')
-
-    # הצעה אוטומטית
-    sug_day = request.args.get('day') or (date.today() + timedelta(days=1)).isoformat()
-    sug_day = valid_day(sug_day)
-    sel_a = sel_d = None; sug_box = ''
-    if request.args.get('suggest'):
-        sel_a, pa, wa_ = suggest_for(c, sug_day, 'arrival')
-        sel_d, pd, wd = suggest_for(c, sug_day, 'departure', exclude=sel_a)
-        def table(title, probs, why, pick):
-            rows = ''.join(f'<tr><td>{"👉 " if k == pick else ""}{COLORS[k]}</td><td><b>{probs[k]}%</b></td>'
-                           f'<td class="muted">{why[k]}</td></tr>' for k in ROUTES)
-            return f'<div><b>{title}</b><table><tr><th>צבע</th><th>סיכוי</th><th>למה</th></tr>{rows}</table></div>'
-        sug_box = ('<div class="card"><h3>🎲 הצעה ל-' + sug_day + '</h3>'
-                   f'<p>הגרלה אקראית משוקללת: צבעים שהשתמשו בהם פחות / מזמן מקבלים סיכוי גבוה יותר. '
-                   f'צבע מאתמול חסום, והיציאה תמיד שונה מההגעה.</p><div class="grid">'
-                   + table('הגעה', pa, wa_, sel_a) + table('יציאה', pd, wd, sel_d) +
-                   '</div><p class="muted">ההצעה מולאה בטופס — בדוק ולחץ שמור. לא מרוצה? הגרל שוב.</p></div>')
-
-    def opts(sel):
-        return ''.join(f'<option value="{k}"{" selected" if k == sel else ""}>{v}</option>' for k, v in COLORS.items())
-
-    rows = c.execute('SELECT * FROM plans ORDER BY day DESC LIMIT 45').fetchall()
-    listing = ''.join(
-        f'<div class="card"><b>{r["day"]}</b> | הגעה {COLORS[r["arrival"]]} | יציאה {COLORS[r["departure"]]}<p>'
-        f'<a class="btn wa" href="{html.escape(wa_link(wa_text(r["day"], r["arrival"], r["departure"])))}" target="_blank" rel="noopener">📲 שלח ב-WhatsApp</a>'
-        f'<a href="/message/{r["day"]}">תצוגת הודעה</a></p></div>' for r in rows)
-
-    return page(
-        '<a href="/report">📊 סטטיסטיקות</a> | <a href="/logout">התנתקות</a>' + saved + sug_box +
-        f'<div class="card"><h3>הנחיה יומית</h3>'
-        f'<form method="get"><input type="hidden" name="suggest" value="1">'
-        f'<input type="date" name="day" value="{sug_day}" required> '
-        f'<button class="sug">🎲 הצע לי צבעים</button></form><hr style="border-color:#2b3d57">'
-        f'<form method="post"><input type="hidden" name="csrf" value="{session["csrf"]}">'
-        f'<input type="date" name="day" value="{sug_day}" required>'
-        f'<p>הגעה <select name="arrival">{opts(sel_a)}</select></p>'
-        f'<p>יציאה <select name="departure">{opts(sel_d)}</select></p><button>שמור</button></form></div>' + listing)
-
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        u = db().execute('SELECT * FROM users WHERE username=?', (request.form.get('username'),)).fetchone()
-        if u and check_password_hash(u['password'], request.form.get('password', '')):
-            session.clear(); session['user'] = u['username']; return redirect('/')
-        return page('פרטי כניסה שגויים <a href="/login">נסה שוב</a>')
-    return page('<form method="post"><input name="username" placeholder="שם משתמש"><input name="password" type="password" placeholder="סיסמה"><button>כניסה</button></form>')
-
-
-@app.route('/logout')
-def logout():
-    session.clear(); return redirect('/login')
-
-
-@app.route('/message/<day>')
-def message(day):
-    protected(); day = valid_day(day)
-    r = db().execute('SELECT * FROM plans WHERE day=?', (day,)).fetchone()
-    if not r: abort(404)
-    text = wa_text(day, r['arrival'], r['departure'])
-    return page('<a href="/">חזרה</a><div class="card"><h3>הודעה</h3><pre id="msg">' + html.escape(text) + '</pre>'
-                f'<a class="btn wa" href="{html.escape(wa_link(text))}" target="_blank" rel="noopener">📲 שלח ב-WhatsApp</a>'
-                '<button onclick="navigator.clipboard.writeText(document.getElementById(\'msg\').innerText)">העתק</button></div>')
-
-
-@app.route('/report')
-def report():
-    protected(); c = db()
-    period = request.args.get('days', '30')
-    days = {'7': 7, '30': 30, '90': 90, 'all': None}.get(period, 30)
-    st, total = stats(c, days)
-    tabs = ' | '.join(f'<a href="/report?days={k}">{"<b>" + v + "</b>" if k == period else v}</a>'
-                      for k, v in [('7', '7 ימים'), ('30', '30 ימים'), ('90', '90 ימים'), ('all', 'הכול')])
-    cards = ''
-    for d, (counts, pct, score, n) in st.items():
-        cards += (f'<div class="card"><h3>{DIR_HE[d]}</h3>'
-                  f'<h2>ציון איזון: {score if score is not None else "אין נתונים"}{"/100" if score is not None else ""}</h2>'
-                  + bars(counts, pct, n, total) + f'<p class="muted">יעד: 25% לכל צבע. {n} הנחיות עם צבע קבוע.</p></div>')
-    # הצעה למחר — תצוגה מקדימה של הסיכויים
-    tmr = (date.today() + timedelta(days=1)).isoformat()
-    _, pa, _ = suggest_for(c, tmr, 'arrival'); _, pd, _ = suggest_for(c, tmr, 'departure')
-    prev = ''.join(f'<tr><td>{COLORS[k]}</td><td>{pa[k]}%</td><td>{pd[k]}%</td></tr>' for k in ROUTES)
-    return page(f'<a href="/">חזרה</a><p>תקופה: {tabs} — סה"כ {total} ימים</p><div class="grid">{cards}</div>'
-                f'<div class="card"><h3>🎯 סיכויי הגרלה למחר ({tmr})</h3>'
-                f'<table><tr><th>צבע</th><th>הגעה</th><th>יציאה*</th></tr>{prev}</table>'
-                '<p class="muted">* לפני חסימת צבע ההגעה. ציון 100 = חלוקה שווה לגמרי.</p></div>')
-
-
-if __name__ == '__main__':
-    app.run(debug=False)
+function render(){ $('demoBox').hidden = !isDemo; renderStats(); renderLog(); }
+load(); render();
+</script>
+</html>
