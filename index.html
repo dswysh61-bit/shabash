@@ -1,0 +1,259 @@
+import os, sqlite3, secrets, html
+from datetime import date, timedelta
+from urllib.parse import quote
+from flask import Flask, request, session, redirect, render_template_string, abort
+from werkzeug.security import generate_password_hash, check_password_hash
+
+app = Flask(__name__)
+SECRET = os.environ.get('SECRET_KEY')
+if not SECRET or len(SECRET) < 32:
+    raise SystemExit('SECRET_KEY חסר או קצר מ-32 תווים')
+app.secret_key = SECRET
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax',
+                  SESSION_COOKIE_SECURE=os.environ.get('PRODUCTION') == '1')
+DB = os.environ.get('DATABASE_PATH', 'demo.sqlite3')
+RNG = secrets.SystemRandom()          # אקראיות קריפטוגרפית — לא ניתנת לחיזוי
+
+# ---- הגדרות האלגוריתם ----
+WINDOW_DAYS = 28        # כמה ימים אחורה נבדק האיזון
+NO_REPEAT_DAYS = 1      # אסור לחזור על אותו צבע באותו כיוון X ימים ברצף
+MIN_WEIGHT = 0.15       # גם צבע "עמוס" נשאר עם סיכוי קטן — כדי שלא יהיה צפוי
+
+COLORS = {'red': '🔴 אדום / Red', 'blue': '🔵 כחול / Blue', 'green': '🟢 ירוק / Green',
+          'yellow': '🟡 צהוב / Yellow', 'white': '⚪ בחירה חופשית / Free choice'}
+ROUTES = [k for k in COLORS if k != 'white']
+DIR_HE = {'arrival': 'הגעה', 'departure': 'יציאה'}
+
+
+def db():
+    c = sqlite3.connect(DB); c.row_factory = sqlite3.Row
+    c.execute('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT NOT NULL)')
+    c.execute('CREATE TABLE IF NOT EXISTS plans (day TEXT PRIMARY KEY, arrival TEXT, departure TEXT)')
+    c.commit(); return c
+
+
+CSS = '''<meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{background:#101827;color:#f2f5ff;font-family:Arial,sans-serif;max-width:850px;margin:30px auto;padding:16px;direction:rtl}
+input,select,button,.btn{padding:12px;margin:6px;border-radius:9px;border:1px solid #54627a;background:#24364e;color:white;font-size:15px}
+button,.btn{background:#286fca;cursor:pointer;text-decoration:none;display:inline-block}
+.wa{background:#1fa855;border-color:#1fa855}.sug{background:#7a4fd0;border-color:#7a4fd0}
+.card{background:#1c2b40;padding:18px;margin:12px 0;border-radius:14px}a{color:#8bbfff}
+pre{white-space:pre-wrap;font:inherit}small{color:#ffdb89}
+.bar{height:10px;border-radius:5px;background:#2b3d57;overflow:hidden;margin:4px 0 10px}.bar i{display:block;height:100%}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+table{width:100%;border-collapse:collapse}td,th{padding:6px;text-align:right;border-bottom:1px solid #2b3d57}
+.muted{color:#9fb0c8;font-size:13px}</style>'''
+BAR_COLOR = {'red': '#e5484d', 'blue': '#3e8ef7', 'green': '#30a46c', 'yellow': '#f5c518', 'white': '#c9d1dc'}
+
+
+def page(content):
+    # התוכן מועבר כמשתנה — לא כחלק מהתבנית (סוגר את חור ה-SSTI)
+    return render_template_string(
+        CSS + '<h2>מערכת גיוון תנועות — גרסת פיתוח</h2>'
+              '<small>דמו בלבד. אין להזין נתונים מבצעיים. אין לפרסם לפני בדיקת אבטחה.</small>{{ c|safe }}',
+        c=content)
+
+
+def protected():
+    if 'user' not in session: abort(403)
+
+
+def valid_day(s):
+    try: return date.fromisoformat(s).isoformat()
+    except (TypeError, ValueError): abort(400)
+
+
+def check_csrf():
+    if not secrets.compare_digest(request.form.get('csrf', ''), session.get('csrf', '-')): abort(403)
+
+
+# ---------- האלגוריתם: אקראי אבל מחושב ----------
+def suggest_for(c, target_day, direction, exclude=None):
+    """מחזיר (צבע נבחר, {צבע: אחוז סיכוי}, {צבע: הסבר})"""
+    t = date.fromisoformat(target_day)
+    start = (t - timedelta(days=WINDOW_DAYS)).isoformat()
+    rows = c.execute('SELECT day, arrival, departure FROM plans WHERE day>=? AND day<? ORDER BY day',
+                     (start, target_day)).fetchall()
+    used = [r[direction] for r in rows if r[direction] in ROUTES]
+    n = len(used)
+    expected = n / len(ROUTES) if n else 0
+    last_seen = {k: None for k in ROUTES}
+    for r in rows:
+        if r[direction] in ROUTES: last_seen[r[direction]] = date.fromisoformat(r['day'])
+    blocked = {r[direction] for r in rows
+               if date.fromisoformat(r['day']) >= t - timedelta(days=NO_REPEAT_DAYS)}
+
+    weights, why = {}, {}
+    for k in ROUTES:
+        cnt = used.count(k)
+        # 1) איזון: צבע שהשתמשו בו פחות מהממוצע מקבל משקל גבוה יותר
+        balance = 1 + (expected - cnt) / expected if expected else 1
+        # 2) טריות: ככל שעבר יותר זמן מהשימוש האחרון — משקל גבוה יותר (עד שבוע)
+        gap = (t - last_seen[k]).days if last_seen[k] else WINDOW_DAYS
+        recency = 1 + min(gap, 7) / 7
+        w = max(MIN_WEIGHT, balance) * recency
+        note = f'{cnt} פעמים ב-{WINDOW_DAYS} יום, אחרון לפני {gap} ימים'
+        if k in blocked: w, note = 0, 'חסום — שומש אתמול'
+        if k == exclude: w, note = 0, 'חסום — זהה לצבע ההגעה'
+        weights[k], why[k] = w, note
+    if not any(weights.values()):            # מקרה קצה: הכול חסום
+        weights = {k: 1 for k in ROUTES if k != exclude}
+    total = sum(weights.values())
+    probs = {k: round(100 * w / total) for k, w in weights.items()}
+    pick = RNG.choices(list(weights), weights=list(weights.values()))[0]
+    return pick, probs, why
+
+
+def stats(c, days=None):
+    q, args = 'SELECT * FROM plans', ()
+    if days:
+        q += ' WHERE day>=?'; args = ((date.today() - timedelta(days=days)).isoformat(),)
+    rows = c.execute(q, args).fetchall()
+    out = {}
+    for d in DIR_HE:
+        counts = {k: sum(r[d] == k for r in rows) for k in COLORS}
+        n = sum(counts[k] for k in ROUTES)
+        pct = {k: (100 * counts[k] / n if n else 0) for k in ROUTES}
+        score = round(100 * (1 - sum(abs(pct[k] / 100 - .25) for k in ROUTES) / 1.5)) if n else None
+        out[d] = (counts, pct, score, n)
+    return out, len(rows)
+
+
+def bars(counts, pct, n, total_rows):
+    s = ''
+    for k in COLORS:
+        p = pct.get(k, 100 * counts[k] / total_rows if total_rows else 0)
+        s += (f'<div>{COLORS[k]} — <b>{counts[k]}</b> פעמים ({p:.0f}%)</div>'
+              f'<div class="bar"><i style="width:{p:.0f}%;background:{BAR_COLOR[k]}"></i></div>')
+    return s
+
+
+def wa_text(day, arrival, departure):
+    he = lambda k: COLORS[k].split(' / ')[0]; en = lambda k: COLORS[k].split(' / ')[1]
+    return (f'*הנחיות תנועה | Movement Instructions*\n{day}\n\n*עברית*\nהגעה: {he(arrival)}\nיציאה: {he(departure)}\n'
+            f'יש לפעול בהתאם להנחיות צוות הביטחון.\n\n*English*\nArrival: {en(arrival)}\nDeparture: {en(departure)}\n'
+            f"Please follow the Security Team's instructions.\n\n*צוות הביטחון | Security Team*")
+
+
+def wa_link(text):
+    # פותח את WhatsApp (אפליקציה בטלפון / WhatsApp Web במחשב) עם ההודעה מוכנה — בוחרים קבוצה ושולחים
+    return 'https://wa.me/?text=' + quote(text)
+
+
+# ---------- דפים ----------
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    c = db(); users = c.execute('SELECT count(*) FROM users').fetchone()[0]
+    if not users:
+        if request.method == 'POST':
+            tok = os.environ.get('SETUP_TOKEN', '')
+            if len(tok) < 24 or not secrets.compare_digest(request.form.get('token', ''), tok): return page('קוד הקמה לא תקין')
+            if len(request.form.get('password', '')) < 12: return page('סיסמה קצרה מדי')
+            c.execute('INSERT INTO users VALUES (?,?)', (request.form['username'], generate_password_hash(request.form['password'])))
+            c.commit(); session.clear(); session['user'] = request.form['username']; return redirect('/')
+        return page('<div class="card"><h3>הקמת מנהל ראשי</h3><form method="post">שם משתמש <input name="username" required><br>'
+                    'סיסמה (12 תווים לפחות) <input name="password" type="password" required><br>'
+                    'קוד הקמה מהשרת <input name="token" type="password" required><br><button>צור חשבון</button></form></div>')
+    if 'user' not in session: return redirect('/login')
+    session.setdefault('csrf', secrets.token_hex(24))
+
+    saved = ''
+    if request.method == 'POST':
+        check_csrf()
+        day = valid_day(request.form.get('day'))
+        a, d = request.form.get('arrival'), request.form.get('departure')
+        if a not in COLORS or d not in COLORS: abort(400)
+        c.execute('INSERT INTO plans VALUES (?,?,?) ON CONFLICT(day) DO UPDATE SET arrival=excluded.arrival,departure=excluded.departure', (day, a, d))
+        c.commit()
+        saved = (f'<div class="card">✅ נשמר ל-{day}. '
+                 f'<a class="btn wa" href="{html.escape(wa_link(wa_text(day, a, d)))}" target="_blank" rel="noopener">📲 שלח עכשיו ב-WhatsApp</a></div>')
+
+    # הצעה אוטומטית
+    sug_day = request.args.get('day') or (date.today() + timedelta(days=1)).isoformat()
+    sug_day = valid_day(sug_day)
+    sel_a = sel_d = None; sug_box = ''
+    if request.args.get('suggest'):
+        sel_a, pa, wa_ = suggest_for(c, sug_day, 'arrival')
+        sel_d, pd, wd = suggest_for(c, sug_day, 'departure', exclude=sel_a)
+        def table(title, probs, why, pick):
+            rows = ''.join(f'<tr><td>{"👉 " if k == pick else ""}{COLORS[k]}</td><td><b>{probs[k]}%</b></td>'
+                           f'<td class="muted">{why[k]}</td></tr>' for k in ROUTES)
+            return f'<div><b>{title}</b><table><tr><th>צבע</th><th>סיכוי</th><th>למה</th></tr>{rows}</table></div>'
+        sug_box = ('<div class="card"><h3>🎲 הצעה ל-' + sug_day + '</h3>'
+                   f'<p>הגרלה אקראית משוקללת: צבעים שהשתמשו בהם פחות / מזמן מקבלים סיכוי גבוה יותר. '
+                   f'צבע מאתמול חסום, והיציאה תמיד שונה מההגעה.</p><div class="grid">'
+                   + table('הגעה', pa, wa_, sel_a) + table('יציאה', pd, wd, sel_d) +
+                   '</div><p class="muted">ההצעה מולאה בטופס — בדוק ולחץ שמור. לא מרוצה? הגרל שוב.</p></div>')
+
+    def opts(sel):
+        return ''.join(f'<option value="{k}"{" selected" if k == sel else ""}>{v}</option>' for k, v in COLORS.items())
+
+    rows = c.execute('SELECT * FROM plans ORDER BY day DESC LIMIT 45').fetchall()
+    listing = ''.join(
+        f'<div class="card"><b>{r["day"]}</b> | הגעה {COLORS[r["arrival"]]} | יציאה {COLORS[r["departure"]]}<p>'
+        f'<a class="btn wa" href="{html.escape(wa_link(wa_text(r["day"], r["arrival"], r["departure"])))}" target="_blank" rel="noopener">📲 שלח ב-WhatsApp</a>'
+        f'<a href="/message/{r["day"]}">תצוגת הודעה</a></p></div>' for r in rows)
+
+    return page(
+        '<a href="/report">📊 סטטיסטיקות</a> | <a href="/logout">התנתקות</a>' + saved + sug_box +
+        f'<div class="card"><h3>הנחיה יומית</h3>'
+        f'<form method="get"><input type="hidden" name="suggest" value="1">'
+        f'<input type="date" name="day" value="{sug_day}" required> '
+        f'<button class="sug">🎲 הצע לי צבעים</button></form><hr style="border-color:#2b3d57">'
+        f'<form method="post"><input type="hidden" name="csrf" value="{session["csrf"]}">'
+        f'<input type="date" name="day" value="{sug_day}" required>'
+        f'<p>הגעה <select name="arrival">{opts(sel_a)}</select></p>'
+        f'<p>יציאה <select name="departure">{opts(sel_d)}</select></p><button>שמור</button></form></div>' + listing)
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        u = db().execute('SELECT * FROM users WHERE username=?', (request.form.get('username'),)).fetchone()
+        if u and check_password_hash(u['password'], request.form.get('password', '')):
+            session.clear(); session['user'] = u['username']; return redirect('/')
+        return page('פרטי כניסה שגויים <a href="/login">נסה שוב</a>')
+    return page('<form method="post"><input name="username" placeholder="שם משתמש"><input name="password" type="password" placeholder="סיסמה"><button>כניסה</button></form>')
+
+
+@app.route('/logout')
+def logout():
+    session.clear(); return redirect('/login')
+
+
+@app.route('/message/<day>')
+def message(day):
+    protected(); day = valid_day(day)
+    r = db().execute('SELECT * FROM plans WHERE day=?', (day,)).fetchone()
+    if not r: abort(404)
+    text = wa_text(day, r['arrival'], r['departure'])
+    return page('<a href="/">חזרה</a><div class="card"><h3>הודעה</h3><pre id="msg">' + html.escape(text) + '</pre>'
+                f'<a class="btn wa" href="{html.escape(wa_link(text))}" target="_blank" rel="noopener">📲 שלח ב-WhatsApp</a>'
+                '<button onclick="navigator.clipboard.writeText(document.getElementById(\'msg\').innerText)">העתק</button></div>')
+
+
+@app.route('/report')
+def report():
+    protected(); c = db()
+    period = request.args.get('days', '30')
+    days = {'7': 7, '30': 30, '90': 90, 'all': None}.get(period, 30)
+    st, total = stats(c, days)
+    tabs = ' | '.join(f'<a href="/report?days={k}">{"<b>" + v + "</b>" if k == period else v}</a>'
+                      for k, v in [('7', '7 ימים'), ('30', '30 ימים'), ('90', '90 ימים'), ('all', 'הכול')])
+    cards = ''
+    for d, (counts, pct, score, n) in st.items():
+        cards += (f'<div class="card"><h3>{DIR_HE[d]}</h3>'
+                  f'<h2>ציון איזון: {score if score is not None else "אין נתונים"}{"/100" if score is not None else ""}</h2>'
+                  + bars(counts, pct, n, total) + f'<p class="muted">יעד: 25% לכל צבע. {n} הנחיות עם צבע קבוע.</p></div>')
+    # הצעה למחר — תצוגה מקדימה של הסיכויים
+    tmr = (date.today() + timedelta(days=1)).isoformat()
+    _, pa, _ = suggest_for(c, tmr, 'arrival'); _, pd, _ = suggest_for(c, tmr, 'departure')
+    prev = ''.join(f'<tr><td>{COLORS[k]}</td><td>{pa[k]}%</td><td>{pd[k]}%</td></tr>' for k in ROUTES)
+    return page(f'<a href="/">חזרה</a><p>תקופה: {tabs} — סה"כ {total} ימים</p><div class="grid">{cards}</div>'
+                f'<div class="card"><h3>🎯 סיכויי הגרלה למחר ({tmr})</h3>'
+                f'<table><tr><th>צבע</th><th>הגעה</th><th>יציאה*</th></tr>{prev}</table>'
+                '<p class="muted">* לפני חסימת צבע ההגעה. ציון 100 = חלוקה שווה לגמרי.</p></div>')
+
+
+if __name__ == '__main__':
+    app.run(debug=False)
